@@ -44,6 +44,12 @@ class ParseArguments:
             help="Block Size for random read access 2^x while x between 14 and 32. Default: 20 => 1 MB",
         )
         parser.add_argument(
+            "--chain",
+            type=int,
+            default=1,
+            help="Use seekable chained-dictionary block compression with this chain length (1-255) instead of plain --block compression. Each chain's first block is independent; the rest are compressed using the previous block as a zstd dictionary, trading some random read access cost for a better compression ratio closer to --solid. Default: 1 (disabled, identical to plain --block)",
+        )
+        parser.add_argument(
             "-V",
             "--verify",
             action="store_true",

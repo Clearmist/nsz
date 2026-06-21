@@ -9,6 +9,7 @@ from os import remove
 from time import sleep
 from nsz.Fs import Nsp, Xci, factory
 from nsz.BlockCompressor import blockCompress
+from nsz.SeekableCompressor import seekableCompress
 from nsz.SolidCompressor import solidCompress
 from traceback import format_exc
 from nsz.Decompressor import verify, decompress, VerificationException
@@ -128,16 +129,29 @@ def compress(filePath, outputDir, args, work, amountOfTastkQueued):
         threadsToUseForBlockCompression = (
             args.threads if args.threads > 0 else cpu_count()
         )
-        outFile = blockCompress(
-            filePath,
-            compressionLevel,
-            args.keep,
-            args.fix_padding,
-            args.long,
-            args.bs,
-            outputDir,
-            threadsToUseForBlockCompression,
-        )
+        if args.chain > 1:
+            outFile = seekableCompress(
+                filePath,
+                compressionLevel,
+                args.keep,
+                args.fix_padding,
+                args.long,
+                args.bs,
+                args.chain,
+                outputDir,
+                threadsToUseForBlockCompression,
+            )
+        else:
+            outFile = blockCompress(
+                filePath,
+                compressionLevel,
+                args.keep,
+                args.fix_padding,
+                args.long,
+                args.bs,
+                outputDir,
+                threadsToUseForBlockCompression,
+            )
         assert outFile is not None
         if args.verify:
             Print.info("[VERIFY NSZ] {0}".format(outFile))

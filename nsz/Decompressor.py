@@ -2,7 +2,7 @@ from pathlib import Path
 from traceback import format_exc
 from hashlib import sha256
 from nsz.nut import Print, aes128
-from zstandard import ZstdDecompressor
+from zstandard import DICT_TYPE_RAWCONTENT, ZstdCompressionDict, ZstdDecompressor
 from nsz.Fs import factory, Pfs0, Hfs0, Nsp, Xci
 from nsz.PathTools import changeExtension, isCompressedGameFile, isNspNsz, isXciXcz
 from nsz import Header, BlockDecompressorReader, FileExistingChecks
@@ -12,6 +12,117 @@ import enlighten
 
 class VerificationException(Exception):
     pass
+
+
+class SeekableDecompressorReader:
+    """Random-access reader for NCZBLOCK type 2 (chained-dictionary blocks).
+
+    Every chainLength'th block ("sync block") is an independent zstd frame.
+    The blocks in between were compressed using the previous block's raw
+    bytes as a zstd content dictionary, so decompressing block N requires
+    first decompressing every block back to N's nearest preceding sync
+    block. See docs/SeekableCompression.md. Seeking is therefore bounded by
+    O(chainLength) block decompressions rather than O(file size) like solid
+    mode, but isn't the O(1) of plain (type 1) block decompression.
+    """
+
+    def __init__(self, nspf, BlockHeader):
+        self.BlockHeader = BlockHeader
+        initialOffset = nspf.tell()
+        self.nspf = nspf
+        if BlockHeader.blockSizeExponent < 14 or BlockHeader.blockSizeExponent > 32:
+            raise ValueError(
+                "Corrupted NCZBLOCK header: Block size must be between 14 and 32"
+            )
+        self.chainLength = BlockHeader.chainLength
+        if self.chainLength < 1:
+            raise ValueError(
+                "Corrupted NCZBLOCK header: chainLength must be at least 1"
+            )
+        self.BlockSize = 2**BlockHeader.blockSizeExponent
+        self.CompressedBlockOffsetList = [initialOffset]
+
+        for compressedBlockSize in BlockHeader.compressedBlockSizeList[:-1]:
+            self.CompressedBlockOffsetList.append(
+                self.CompressedBlockOffsetList[-1] + compressedBlockSize
+            )
+
+        self.CompressedBlockSizeList = BlockHeader.compressedBlockSizeList
+        self.Position = 0
+        self.CurrentBlock = b""
+        self.CurrentBlockId = -1
+
+    def __decompressedBlockSize(self, blockID):
+        decompressedBlockSize = self.BlockSize
+        if blockID >= len(self.CompressedBlockOffsetList) - 1:
+            remainder = self.BlockHeader.decompressedSize % self.BlockSize
+            if remainder > 0:
+                decompressedBlockSize = remainder
+        return decompressedBlockSize
+
+    def __decompressBlock(self, blockID):
+        if self.CurrentBlockId == blockID:
+            return self.CurrentBlock
+        if blockID >= len(self.CompressedBlockOffsetList):
+            raise EOFError(
+                "BlockID exceeds the amounts of compressed blocks in that file!"
+            )
+        chainPos = blockID % self.chainLength
+        if chainPos != 0 and self.CurrentBlockId != blockID - 1:
+            # Walk forward from this block's sync block so we have the
+            # immediately preceding block's raw bytes available as a
+            # dictionary below.
+            chainStart = blockID - chainPos
+            for previousBlockID in range(chainStart, blockID):
+                self.__decompressBlock(previousBlockID)
+
+        decompressedBlockSize = self.__decompressedBlockSize(blockID)
+        self.nspf.seek(self.CompressedBlockOffsetList[blockID])
+        if self.CompressedBlockSizeList[blockID] < decompressedBlockSize:
+            compressed = self.nspf.read(self.CompressedBlockSizeList[blockID])
+            if chainPos == 0:
+                decompressed = ZstdDecompressor().decompress(
+                    compressed, max_output_size=decompressedBlockSize
+                )
+            else:
+                dictData = ZstdCompressionDict(
+                    self.CurrentBlock, dict_type=DICT_TYPE_RAWCONTENT
+                )
+                decompressed = ZstdDecompressor(dict_data=dictData).decompress(
+                    compressed, max_output_size=decompressedBlockSize
+                )
+        else:
+            decompressed = self.nspf.read(decompressedBlockSize)
+        self.CurrentBlock = decompressed
+        self.CurrentBlockId = blockID
+        return decompressed
+
+    def seek(self, offset, whence=0):
+        if whence == 0:
+            self.Position = offset
+        elif whence == 1:
+            self.Position += offset
+        elif whence == 2:
+            self.Position = self.BlockHeader.decompressedSize + offset
+        else:
+            raise ValueError("whence argument must be 0, 1 or 2")
+
+    def read(self, length):
+        buffer = b""
+        blockOffset = self.Position % self.BlockSize
+        blockID = self.Position // self.BlockSize
+
+        while len(buffer) - blockOffset < length:
+            if blockID >= len(self.CompressedBlockOffsetList):
+                break
+
+            buffer += self.__decompressBlock(blockID)
+            blockID += 1
+
+        buffer = buffer[blockOffset : blockOffset + length]
+        self.Position += length
+
+        return buffer
 
 
 def decompress(filePath, outputDir, fixPadding, statusReportInfo=None, pleaseNoPrint=None):
@@ -294,11 +405,17 @@ def __decompressNcz(
     useBlockCompression = blockMagic == b"NCZBLOCK"
     blockDecompressorReader = None
     if useBlockCompression:
-        Print.info(f"[NCZBLOCK]   Using Block decompression for {nspf._path}")
         BlockHeader = Header.Block(nspf)
-        blockDecompressorReader = BlockDecompressorReader.BlockDecompressorReader(
-            nspf, BlockHeader
-        )
+        if BlockHeader.type == 2:
+            Print.info(
+                f"[NCZBLOCK]   Using seekable chained-dictionary decompression for {nspf._path}"
+            )
+            blockDecompressorReader = SeekableDecompressorReader(nspf, BlockHeader)
+        else:
+            Print.info(f"[NCZBLOCK]   Using Block decompression for {nspf._path}")
+            blockDecompressorReader = BlockDecompressorReader.BlockDecompressorReader(
+                nspf, BlockHeader
+            )
     pos = nspf.tell()
     decompressor = None
     if not useBlockCompression:

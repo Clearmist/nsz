@@ -32,4 +32,5 @@ titledb/
 *.exe
 *.7z
 * - Copy*
-
+*benchmark*.md
+*benchmark*.csv

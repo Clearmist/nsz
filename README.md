@@ -259,7 +259,11 @@ At 0x4000 there is the variable sized NCZ Header. It contains a list of sections
 
 All of the information in the header can be derived from the original NCA + Ticket, however it is provided pre-parsed to make decompression as easy as possible for third parties.
 
-Directly after the NCZ header, the zStandard stream begins and ends at EOF. The stream is decompressed to offset 0x4000. If block compression is used the stream is split into independent blocks and can be decompressed as shown in <https://github.com/nicoboss/nsz/blob/master/nsz/BlockDecompressorReader.py>.
+Directly after the NCZ header, the zStandard stream begins and ends at EOF. The stream is decompressed to offset 0x4000.
+
+If block compression is used the stream is split into independent blocks (`Block.type == 1`) and can be decompressed as shown in <https://github.com/nicoboss/nsz/blob/master/nsz/BlockDecompressorReader.py>.
+
+There is also a seekable chained-dictionary block mode (`Block.type == 2`, enabled via `--chain`) that trades a bit of random-read cost for a better compression ratio closer to solid mode - see [docs/DictionaryChainedBlocksQuickstart.md](docs/DictionaryChainedBlocksQuickstart.md) for an implementation guide and <https://github.com/nicoboss/nsz/blob/master/nsz/Decompressor.py> (`SeekableDecompressorReader`) for the reference reader.
 
 CompressedBlockSizeList[blockID] must not exceed decompressedBlockSize. If smaller: the block must be decompressed. If equal: the block is stored in plain text.
 
@@ -278,8 +282,8 @@ class Block:
  def __init__(self, f):
   self.magic = f.read(8) # b'NCZBLOCK'
   self.version = f.readInt8()
-  self.type = f.readInt8()
-  self.unused = f.readInt8()
+  self.type = f.readInt8() # 1 = independent blocks, 2 = chained-dictionary blocks
+  self.chainLength = f.readInt8() # unused for type 1; chain length (1-255) for type 2
   self.blockSizeExponent = f.readInt8()
   self.numberOfBlocks = f.readInt32()
   self.decompressedSize = f.readInt64()
